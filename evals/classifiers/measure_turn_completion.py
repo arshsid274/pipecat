@@ -31,30 +31,15 @@ import yaml
 
 from pipecat.classifiers.base_classifier import BaseClassifier, ClassifierError
 from pipecat.classifiers.jev import JevClassifier
+from pipecat.turns.user_stop.classifier_user_turn_completion_stop_strategy import (
+    TURN_COMPLETION_CRITERIA as CRITERIA,
+)
+from pipecat.turns.user_stop.classifier_user_turn_completion_stop_strategy import (
+    TURN_COMPLETION_OPTIONS as OPTIONS,
+)
 
 HERE = Path(__file__).parent
 SCENARIOS = HERE.parent / "release" / "scenarios" / "scripted"
-
-# The question, phrased after the turn-completion protocol the LLM follows.
-CRITERIA = (
-    "The user is talking to a voice assistant. Their words come from speech "
-    "recognition, without punctuation, and may have been cut off. Decide whether "
-    "the user's turn is complete. Complete means conversationally complete, not "
-    "long: one word can be a complete answer, a question is complete, a "
-    "correction is complete."
-)
-OPTIONS = {
-    "complete": "the user has taken their turn and the assistant should answer",
-    "short": (
-        "the user stopped mid-sentence and will continue in a few seconds: the last "
-        "words leave a phrase open, such as ending on a conjunction, a preposition, "
-        "an article, or an unfinished list or number"
-    ),
-    "long": (
-        "the user needs time to think or asked the assistant to wait, or has only "
-        "acknowledged the question without answering it"
-    ),
-}
 
 
 def load_turns(with_context: bool) -> list[dict]:
