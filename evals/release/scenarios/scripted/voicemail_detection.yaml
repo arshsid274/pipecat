@@ -1,0 +1,28 @@
+name: voicemail_detection
+
+# Outbound call answered by a voicemail greeting or by a person. The bot says
+# nothing until it knows which; on a voicemail it leaves its message once the
+# greeting goes quiet, on a person it answers normally.
+
+user: !include ../user_audio.yaml
+
+judge: !include ../judge_audio.yaml
+
+scenarios:
+  # A voicemail greeting. The bot's own reply to the greeting is held back and
+  # dropped; what it says is the message from the on_voicemail_detected handler.
+  - name: voicemail
+    turns:
+      - user: "Hi, you've reached Sam. I can't take your call right now, so please leave a message after the tone and I'll get back to you."
+        expect:
+          - event: tts_response
+            text_contains: "Jamie"
+            within_ms: 20000
+
+  # A person picks up. The bot answers them.
+  - name: conversation
+    turns:
+      - user: "Hello? Who is this?"
+        expect:
+          - event: response
+            eval: "the bot responds to the person who answered, for example by introducing itself, explaining why it is calling, or asking how it can help"
