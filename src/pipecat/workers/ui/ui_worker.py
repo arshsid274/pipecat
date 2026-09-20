@@ -11,6 +11,7 @@ import json
 from dataclasses import asdict, is_dataclass
 from typing import Any
 
+from loguru import logger
 from pydantic import BaseModel
 
 from pipecat.bus.messages import (
@@ -24,6 +25,7 @@ from pipecat.bus.ui.messages import (
     BusUICommandMessage,
     BusUIEventMessage,
 )
+from pipecat.classifiers.base_classifier import BaseClassifier, ClassifierError
 from pipecat.frames.frames import LLMContextFrame, LLMMessagesAppendFrame, LLMMessagesUpdateFrame
 from pipecat.pipeline.job_context import JobGroupContext, JobGroupParams, JobStatus
 from pipecat.pipeline.job_decorator import job
@@ -67,6 +69,9 @@ class UIWorker(BaseUIWorker, LLMContextWorker):
       (which decides how the answer reaches the user).
     - Surface long work. ``ui_job_group`` / ``start_ui_job_group`` fan work out to
       peer workers as cancellable job-group cards on the client.
+    - Decide small things without an LLM turn. With a ``classifier``,
+      ``should_respond`` asks whether a UI event calls for the assistant to
+      speak before the worker runs a turn for it.
 
     ``PipelineWorker`` connects a UIWorker to the client automatically when RTVI
     is enabled -- no extra wiring. A working subclass needs only an LLM and a
@@ -104,6 +109,7 @@ class UIWorker(BaseUIWorker, LLMContextWorker):
         auto_inject_ui_state: bool = True,
         keep_history: bool = False,
         prompt_guide: str | None = UI_STATE_PROMPT_GUIDE,
+        classifier: BaseClassifier | None = None,
     ):
         """Initialize the UIWorker.
 
@@ -137,6 +143,10 @@ class UIWorker(BaseUIWorker, LLMContextWorker):
                 ``<ui_event>`` messages. Defaults to ``UI_STATE_PROMPT_GUIDE``;
                 pass a string to override or ``None`` to disable. Living in
                 ``system_instruction``, it survives context resets.
+            classifier: Answers small questions about the screen without an
+                LLM turn, such as whether a UI event deserves a response
+                (``should_respond``). Set up when the worker starts and
+                cleaned up when it stops.
         """
         super().__init__(
             name,
@@ -155,6 +165,7 @@ class UIWorker(BaseUIWorker, LLMContextWorker):
         self._inject_events = inject_events
         self._auto_inject_ui_state = auto_inject_ui_state
         self._keep_history = keep_history
+        self._classifier = classifier
         self._ui_event_handlers = _collect_ui_event_handlers(self)
         # Latest accessibility snapshot received from the client. Updated
         # in ``on_bus_message`` when a ``__ui_snapshot`` event arrives.
@@ -189,6 +200,63 @@ class UIWorker(BaseUIWorker, LLMContextWorker):
             content = self.render_ui_state()
             if content:
                 frame.context.add_message({"role": "developer", "content": content})
+
+    @property
+    def classifier(self) -> BaseClassifier | None:
+        """The classifier this worker asks small questions, if it has one."""
+        return self._classifier
+
+    async def on_activated(self, args: dict | None) -> None:
+        """Set the classifier up in this worker, then activate as usual.
+
+        Args:
+            args: Optional activation arguments.
+        """
+        if self._classifier is not None:
+            await self._classifier.setup(self)
+        await super().on_activated(args)
+
+    async def cleanup(self) -> None:
+        """Clean up the classifier along with the worker."""
+        if self._classifier is not None:
+            await self._classifier.cleanup()
+        await super().cleanup()
+
+    async def should_respond(
+        self,
+        message: BusUIEventMessage,
+        criteria: str = "the assistant should say something about what the user just did",
+        threshold: float = 0.6,
+    ) -> bool:
+        """Ask the classifier whether a UI event calls for the assistant to speak.
+
+        Most clicks and edits need no comment. Asking first costs one small
+        question instead of an LLM turn for every event. The question carries
+        the event and the latest ``<ui_state>`` snapshot.
+
+        Args:
+            message: The UI event.
+            criteria: What is being checked for, as a yes or no question.
+            threshold: The probability at or above which the answer is yes.
+
+        Returns:
+            Whether the assistant should respond to the event.
+
+        Raises:
+            ClassifierError: If the worker has no classifier, or it could not
+                answer.
+        """
+        if self._classifier is None:
+            raise ClassifierError(f"{self.name} has no classifier to ask")
+        state: dict[str, Any] = {
+            "event": {"name": message.event_name, "payload": message.payload},
+        }
+        screen = self.render_ui_state()
+        if screen:
+            state["screen"] = screen
+        result = await self._classifier.yes_no(state, criteria)
+        logger.debug(f"{self.name}: respond to '{message.event_name}'? {result.probability:.2f}")
+        return result.probability >= threshold
 
     async def send_command(self, name: str, payload: Any = None) -> None:
         """Send a named UI command to the client.

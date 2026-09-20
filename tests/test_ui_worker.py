@@ -841,3 +841,86 @@ class TestUIWorkerPromptGuide(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _FakeClassifier:
+    """Answers yes_no from a scripted probability and records what it was asked."""
+
+    def __init__(self, probability: float):
+        self.probability = probability
+        self.asked: list = []
+        self.setup_worker = None
+        self.cleaned_up = False
+
+    @property
+    def calibrated(self) -> bool:
+        return True
+
+    async def setup(self, worker):
+        self.setup_worker = worker
+
+    async def cleanup(self):
+        self.cleaned_up = True
+
+    async def yes_no(self, state, criteria):
+        from pipecat.classifiers.base_classifier import YesNoResult
+
+        self.asked.append((state, criteria))
+        return YesNoResult(probability=self.probability)
+
+    async def choice(self, state, options, criteria):
+        raise NotImplementedError
+
+    async def score(self, state, rubric, criteria):
+        raise NotImplementedError
+
+
+class TestUIWorkerClassifier(unittest.IsolatedAsyncioTestCase):
+    async def test_should_respond_asks_with_the_event_and_the_screen(self):
+        classifier = _FakeClassifier(0.9)
+        worker = await _make_worker(classifier=classifier)
+        worker._latest_snapshot = _SAMPLE_SNAPSHOT
+        event = BusUIEventMessage(
+            source="music", target="ui", event_name="nav_click", payload={"view": "home"}
+        )
+
+        self.assertTrue(await worker.should_respond(event))
+
+        state, criteria = classifier.asked[0]
+        self.assertEqual(state["event"], {"name": "nav_click", "payload": {"view": "home"}})
+        self.assertTrue(state["screen"].startswith("<ui_state>"))
+        self.assertIn("say something", criteria)
+
+    async def test_should_respond_is_false_below_the_threshold(self):
+        worker = await _make_worker(classifier=_FakeClassifier(0.3))
+        event = BusUIEventMessage(source="music", target="ui", event_name="scroll", payload={})
+
+        self.assertFalse(await worker.should_respond(event))
+        self.assertTrue(await worker.should_respond(event, threshold=0.2))
+
+    async def test_should_respond_without_a_snapshot_sends_only_the_event(self):
+        classifier = _FakeClassifier(0.9)
+        worker = await _make_worker(classifier=classifier)
+        event = BusUIEventMessage(source="music", target="ui", event_name="scroll", payload={})
+
+        await worker.should_respond(event)
+        state, _ = classifier.asked[0]
+        self.assertNotIn("screen", state)
+
+    async def test_should_respond_without_a_classifier_raises(self):
+        from pipecat.classifiers.base_classifier import ClassifierError
+
+        worker = await _make_worker()
+        event = BusUIEventMessage(source="music", target="ui", event_name="scroll", payload={})
+
+        with self.assertRaises(ClassifierError):
+            await worker.should_respond(event)
+
+    async def test_activation_sets_the_classifier_up_in_the_worker(self):
+        classifier = _FakeClassifier(0.9)
+        worker = await _make_worker(classifier=classifier)
+
+        await worker.on_activated(None)
+
+        self.assertIs(classifier.setup_worker, worker)
+        self.assertIs(worker.classifier, classifier)
