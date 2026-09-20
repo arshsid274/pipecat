@@ -390,8 +390,11 @@ class WorkerRunner(BaseObject, BusSubscriber):
 
         await self._load_setup_files()
 
-        for entry in self._entries.values():
-            await self._start_worker(entry)
+        # A worker can add another while it starts (a processor adding a child
+        # worker in its setup), so keep starting until none is left waiting.
+        while pending := [e for e in self._entries.values() if e.runner_task is None]:
+            for entry in pending:
+                await self._start_worker(entry)
 
         self._running = True
 
