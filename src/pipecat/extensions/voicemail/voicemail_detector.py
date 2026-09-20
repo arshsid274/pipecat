@@ -20,14 +20,8 @@ import warnings
 
 from loguru import logger
 
-from pipecat.classifiers.base_classifier import (
-    BaseClassifier,
-    ChoiceResult,
-    ClassifierError,
-    ClassifierState,
-    ScoreResult,
-    YesNoResult,
-)
+from pipecat.classifiers.base_classifier import BaseClassifier, ClassifierError
+from pipecat.classifiers.llm import LLMClassifier
 from pipecat.frames.frames import (
     EndFrame,
     Frame,
@@ -42,11 +36,11 @@ from pipecat.frames.frames import (
     UserStoppedSpeakingFrame,
     WorkerFrame,
 )
-from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor, FrameProcessorSetup
 from pipecat.services.llm_service import LLMService
 from pipecat.utils.sync.base_notifier import BaseNotifier
 from pipecat.utils.sync.event_notifier import EventNotifier
+from pipecat.workers.llm.llm_classifier_worker import DEFAULT_INSTRUCTIONS
 
 # Lifecycle frames that must still flow after voicemail is detected.
 _CLOSED_GATE_ALLOWLIST = (SystemFrame, EndFrame, StopFrame, WorkerFrame)
@@ -266,10 +260,12 @@ VOICEMAIL SYSTEM (respond "VOICEMAIL"):
         if classifier is None and llm is None:
             raise ValueError("VoicemailDetector needs a classifier")
         if classifier is None:
-            classifier = _LLMPromptClassifier(
-                llm,  # type: ignore[arg-type]
-                custom_system_prompt or self.DEFAULT_SYSTEM_PROMPT,
-            )
+            # The old prompt asked for a one-word reply; the classifier's own
+            # instructions, which ask for a tool call, come last and win.
+            instructions = None
+            if custom_system_prompt:
+                instructions = f"{custom_system_prompt}\n\n{DEFAULT_INSTRUCTIONS}"
+            classifier = LLMClassifier(llm=llm, instructions=instructions)  # type: ignore[arg-type]
         self._classifier = classifier
         self._voicemail_response_delay = voicemail_response_delay
         self._decision_threshold = decision_threshold
@@ -403,47 +399,3 @@ VOICEMAIL SYSTEM (respond "VOICEMAIL"):
             except TimeoutError:
                 await self._call_event_handler("on_voicemail_detected")
                 break
-
-
-class _LLMPromptClassifier(BaseClassifier):
-    """Answers the voicemail question by asking an LLM directly, with a prompt.
-
-    Backs the deprecated ``llm`` parameter of :class:`VoicemailDetector`. It
-    only answers the voicemail question, always with full confidence, since
-    the LLM's one-word reply carries none.
-    """
-
-    def __init__(self, llm: LLMService, prompt: str):
-        self._llm = llm
-        self._prompt = prompt
-
-    @property
-    def calibrated(self) -> bool:
-        return False
-
-    async def yes_no(self, state: ClassifierState, criteria: str) -> YesNoResult:
-        raise ClassifierError("Only the voicemail question is supported")
-
-    async def choice(
-        self, state: ClassifierState, options: dict[str, str], criteria: str
-    ) -> ChoiceResult:
-        context = LLMContext([{"role": "user", "content": str(state)}])
-        try:
-            reply = await self._llm.run_inference(context, system_instruction=self._prompt)
-        except NotImplementedError as e:
-            raise ClassifierError(f"{self._llm} cannot run a one-shot inference") from e
-        reply = (reply or "").upper()
-        if "CONVERSATION" in reply:
-            label = "conversation"
-        elif "VOICEMAIL" in reply:
-            label = "voicemail"
-        else:
-            raise ClassifierError(f"No verdict in LLM reply: {reply!r}")
-        return ChoiceResult(
-            label=label,
-            probabilities={option: float(option == label) for option in options},
-            confidence=1.0,
-        )
-
-    async def score(self, state: ClassifierState, rubric: list[str], criteria: str) -> ScoreResult:
-        raise ClassifierError("Only the voicemail question is supported")

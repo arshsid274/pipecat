@@ -17,6 +17,7 @@ Usage::
     JEV_API_KEY=... python evals/classifiers/measure_turn_completion.py
     python evals/classifiers/measure_turn_completion.py --no-context
     python evals/classifiers/measure_turn_completion.py --repeat 3
+    OPENAI_API_KEY=... python evals/classifiers/measure_turn_completion.py --llm gpt-4o-mini
 """
 
 import argparse
@@ -31,12 +32,15 @@ import yaml
 
 from pipecat.classifiers.base_classifier import BaseClassifier, ClassifierError
 from pipecat.classifiers.jev import JevClassifier
+from pipecat.classifiers.llm import LLMClassifier
 from pipecat.turns.user_stop.classifier_user_turn_completion_stop_strategy import (
     TURN_COMPLETION_CRITERIA as CRITERIA,
 )
 from pipecat.turns.user_stop.classifier_user_turn_completion_stop_strategy import (
     TURN_COMPLETION_OPTIONS as OPTIONS,
 )
+from pipecat.workers.base_worker import BaseWorker
+from pipecat.workers.runner import WorkerRunner
 
 HERE = Path(__file__).parent
 SCENARIOS = HERE.parent / "release" / "scenarios" / "scripted"
@@ -50,9 +54,9 @@ def load_turns(with_context: bool) -> list[dict]:
 
     Loader.add_constructor("!include", lambda loader, node: None)
     for path in sorted(SCENARIOS.glob("*.yaml")):
-        # The incomplete-turn scenarios cut lines off on purpose; the labeled
+        # The turn-completion scenarios cut lines off on purpose; the labeled
         # set above covers those.
-        if path.name.startswith("filter_incomplete_turns"):
+        if path.name.startswith(("filter_incomplete_turns", "classifier_turn_completion")):
             continue
         data = yaml.load(open(path), Loader=Loader) or {}
         for scenario in data.get("scenarios") or []:
@@ -135,21 +139,49 @@ async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--no-context", action="store_true", help="drop the bot's previous line")
     parser.add_argument("--repeat", type=int, default=1, help="run the set this many times")
+    parser.add_argument("--llm", metavar="MODEL", help="use an OpenAI model instead of Jev")
     args = parser.parse_args()
+
+    turns = load_turns(with_context=not args.no_context)
+    print(f"{len(turns)} labeled turns, context {'off' if args.no_context else 'on'}")
+
+    if args.llm:
+        await measure_with_llm(args.llm, turns, args.repeat)
+        return
 
     api_key = os.getenv("JEV_API_KEY")
     if not api_key:
         sys.exit("JEV_API_KEY is not set")
     classifier = JevClassifier(api_key=api_key)
     try:
-        turns = load_turns(with_context=not args.no_context)
-        print(f"{len(turns)} labeled turns, context {'off' if args.no_context else 'on'}")
         await measure(classifier, turns, args.repeat)
-        print(
-            f"\ntokens  in {classifier.client.usage.input_tokens}  out {classifier.client.usage.output_tokens}"
-        )
+        usage = classifier.client.usage
+        print(f"\ntokens  in {usage.input_tokens}  out {usage.output_tokens}")
     finally:
         await classifier.cleanup()
+
+
+async def measure_with_llm(model: str, turns: list[dict], repeat: int) -> None:
+    """Run the measurement with an LLM classifier, which needs a worker to live in."""
+    from pipecat.services.openai.llm import OpenAILLMService
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        sys.exit("OPENAI_API_KEY is not set")
+    classifier = LLMClassifier(llm=OpenAILLMService(api_key=api_key, model=model))
+    owner = BaseWorker("measure")
+    runner = WorkerRunner(handle_sigint=False)
+    await runner.add_workers(owner)
+
+    async def body():
+        try:
+            await classifier.setup(owner)
+            await measure(classifier, turns, repeat)
+        finally:
+            await classifier.cleanup()
+            await runner.cancel()
+
+    await asyncio.gather(runner.run(), body())
 
 
 if __name__ == "__main__":

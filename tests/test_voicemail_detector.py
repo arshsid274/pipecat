@@ -15,10 +15,9 @@ from pipecat.classifiers.base_classifier import (
     ScoreResult,
     YesNoResult,
 )
+from pipecat.classifiers.llm import LLMClassifier
 from pipecat.extensions.voicemail.voicemail_detector import (
-    VOICEMAIL_OPTIONS,
     VoicemailDetector,
-    _LLMPromptClassifier,
 )
 from pipecat.frames.frames import (
     EndWorkerFrame,
@@ -312,10 +311,6 @@ class _FakeLLM(LLMService):
         self.reply = reply
         self.seen = []
 
-    async def run_inference(self, context, max_tokens=None, system_instruction=None):
-        self.seen.append((context.get_messages(), system_instruction))
-        return self.reply
-
 
 class TestDeprecatedLLMParameter(unittest.IsolatedAsyncioTestCase):
     def test_llm_parameter_warns(self):
@@ -328,19 +323,12 @@ class TestDeprecatedLLMParameter(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             VoicemailDetector()
 
-    async def test_llm_reply_becomes_a_verdict(self):
-        llm = _FakeLLM("VOICEMAIL")
-        classifier = _LLMPromptClassifier(llm, "prompt")
-        result = await classifier.choice("Leave a message.", VOICEMAIL_OPTIONS, "")
-
-        self.assertEqual(result.label, "voicemail")
-        self.assertEqual(result.confidence, 1.0)
-        self.assertFalse(classifier.calibrated)
-        messages, instruction = llm.seen[0]
-        self.assertEqual(messages[0]["content"], "Leave a message.")
-        self.assertEqual(instruction, "prompt")
-
-    async def test_llm_reply_without_a_verdict_is_an_error(self):
-        classifier = _LLMPromptClassifier(_FakeLLM("I am not sure"), "prompt")
-        with self.assertRaises(ClassifierError):
-            await classifier.choice("Hello?", VOICEMAIL_OPTIONS, "")
+    def test_llm_builds_an_llm_classifier(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            detector = VoicemailDetector(llm=_FakeLLM("VOICEMAIL"), custom_system_prompt="Extra")
+        classifier = detector._classifier
+        self.assertIsInstance(classifier, LLMClassifier)
+        instructions = classifier.worker.instructions
+        self.assertTrue(instructions.startswith("Extra"))
+        self.assertIn("calling that tool", instructions)

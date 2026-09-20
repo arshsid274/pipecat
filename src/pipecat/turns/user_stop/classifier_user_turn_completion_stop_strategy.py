@@ -111,7 +111,8 @@ class ClassifierUserTurnCompletionStopStrategy(BaseUserTurnStopStrategy):
             long_timeout: Seconds to keep the turn open after a ``long``
                 verdict.
             classification_timeout: Seconds to wait for the classifier before
-                ending the turn without it.
+                ending the turn without it. The default fits Jev; an LLM
+                classifier usually needs more.
             **kwargs: Additional keyword arguments forwarded to the base class.
         """
         super().__init__(**kwargs)
